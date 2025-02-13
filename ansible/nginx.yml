@@ -1,0 +1,134 @@
+---
+- name: Setup Nginx
+  hosts: web
+  become: yes
+  gather_facts: false
+  tasks:
+    - name: Wait for apt lock to be released
+      wait_for:
+        path: /var/lib/dpkg/lock-frontend
+        state: absent
+      retries: 5
+      delay: 10
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+      retries: 3
+      delay: 10
+
+    - name: Install Nginx
+      apt:
+        name: nginx
+        state: present
+      retries: 3
+      delay: 10
+
+    - name: Enable Nginx to start at boot
+      systemd:
+        name: nginx
+        enabled: yes
+        state: started
+
+    - name: Restart Nginx to apply new configuration
+      service:
+        name: nginx
+        state: restarted
+
+- name: Setup HAProxy Load Balancer
+  hosts: nodejs
+  become: yes
+  gather_facts: false
+  tasks:
+    - name: Wait for apt lock to be released
+      wait_for:
+        path: /var/lib/dpkg/lock-frontend
+        state: absent
+      retries: 5
+      delay: 10
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+      retries: 3
+      delay: 10
+
+    - name: Install HAProxy
+      apt:
+        name: haproxy
+        state: present
+      retries: 3
+      delay: 10
+
+    - name: Configure HAProxy
+      copy:
+        content: |
+          # Simple HAProxy Configuration
+          global
+                  log /dev/log    local0
+                  log /dev/log    local1 notice
+                  chroot /var/lib/haproxy
+                  stats socket /run/haproxy/admin.sock mode 660 level admin
+                  stats timeout 30s
+                  user haproxy
+                  group haproxy
+                  daemon
+
+                  # Default SSL material locations
+                  ca-base /etc/ssl/certs
+                  crt-base /etc/ssl/private
+
+                  # See: https://ssl-config.mozilla.org/#server=haproxy&server-version=2.0.3
+                  ssl-default-bind-ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256
+                  ssl-default-bind-ciphersuites TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384
+                  ssl-default-bind-options ssl-min-ver TLSv1.2 no-tls-tickets
+
+          defaults
+                  log     global
+                  mode    http
+                  option  httplog
+                  option  dontlognull
+                  timeout connect 5000
+                  timeout client  50000
+                  timeout server  50000
+                  errorfile 400 /etc/haproxy/errors/400.http
+                  errorfile 403 /etc/haproxy/errors/403.http
+                  errorfile 408 /etc/haproxy/errors/408.http
+                  errorfile 500 /etc/haproxy/errors/500.http
+                  errorfile 502 /etc/haproxy/errors/502.http
+                  errorfile 503 /etc/haproxy/errors/503.http
+                  errorfile 504 /etc/haproxy/errors/504.http
+
+          frontend http_front
+                  bind *:80
+                  default_backend http_back
+
+          backend http_back
+                  balance roundrobin
+                  server server1 192.168.11.246:80
+                  server server2 192.168.11.247:80
+        dest: /etc/haproxy/haproxy.cfg
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Validate HAProxy configuration
+      command: haproxy -c -f /etc/haproxy/haproxy.cfg
+      register: haproxy_validate
+      ignore_errors: yes
+
+    - name: Fail if HAProxy configuration is invalid
+      fail:
+        msg: "HAProxy configuration is invalid. Check the configuration file."
+      when: haproxy_validate.rc != 0
+
+    - name: Enable HAProxy to start at boot
+      systemd:
+        name: haproxy
+        enabled: yes
+        state: started
+
+    - name: Restart HAProxy to apply new configuration
+      service:
+        name: haproxy
+        state: restarted
